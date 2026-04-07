@@ -12,6 +12,20 @@ export const typeDefs = `#graphql
     nos
   }
 
+  enum PaymentMode {
+    CASH
+    UPI
+  }
+
+  enum DatePreset {
+    TODAY
+    YESTERDAY
+    THIS_WEEK
+    LAST_WEEK
+    THIS_MONTH
+    LAST_MONTH
+  }
+
   type User {
     id: ID!
     name: String!
@@ -38,20 +52,41 @@ export const typeDefs = `#graphql
 
   type Sale {
     id: ID!
+    product: Product!
     itemName: String!
-    category: SaleCategory!
-    quantityKg: Float!
-    unitPrice: Float!
+    quantityValue: Float!
+    quantityUnit: QuantityUnit!
+    costPrice: Float!
+    sellingPrice: Float!
+    paymentMode: PaymentMode!
     totalPrice: Float!
     soldAt: String!
     owner: User!
   }
 
+  type TopSellingItem {
+    itemName: String!
+    totalAmount: Float!
+    transactionCount: Int!
+  }
+
+  type RecentTransaction {
+    id: ID!
+    itemSummary: String!
+    itemCount: Int!
+    totalPrice: Float!
+    paymentMode: PaymentMode!
+    soldAt: String!
+  }
+
   type DashboardStats {
-    totalSalesAmount: Float!
-    totalOrders: Int!
-    fruitsAmount: Float!
-    vegetablesAmount: Float!
+    cashAmount: Float!
+    upiAmount: Float!
+    totalAmount: Float!
+    cashTransactions: Int!
+    upiTransactions: Int!
+    topSellingItems: [TopSellingItem!]!
+    recentTransactions: [RecentTransaction!]!
   }
 
   type AuthPayload {
@@ -71,12 +106,19 @@ export const typeDefs = `#graphql
     password: String!
   }
 
-  input CreateSaleInput {
-    itemName: String!
-    category: SaleCategory!
-    quantityKg: Float!
-    unitPrice: Float!
-    soldAt: String!
+  input SaleLineInput {
+    productId: ID!
+    quantityValue: Float!
+    sellingPrice: Float!
+  }
+
+  input CreateSalesInput {
+    items: [SaleLineInput!]!
+    paymentMode: PaymentMode!
+  }
+
+  input DashboardFilterInput {
+    preset: DatePreset!
   }
 
   input CreateCategoryInput {
@@ -108,15 +150,16 @@ export const typeDefs = `#graphql
   type Query {
     me: User
     sales: [Sale!]!
-    dashboardStats: DashboardStats!
+    dashboardStats(filter: DashboardFilterInput!): DashboardStats!
     categories: [Category!]!
     products: [Product!]!
+    searchProducts(term: String!): [Product!]!
   }
 
   type Mutation {
     register(input: RegisterInput!): AuthPayload!
     login(input: LoginInput!): AuthPayload!
-    createSale(input: CreateSaleInput!): Sale!
+    createSales(input: CreateSalesInput!): [Sale!]!
     deleteSale(id: ID!): Boolean!
     createCategory(input: CreateCategoryInput!): Category!
     updateCategory(id: ID!, input: UpdateCategoryInput!): Category!
