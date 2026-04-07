@@ -20,6 +20,7 @@ const escapeRegex = (value: string): string =>
 const validateProductInput = (input: {
   name: string;
   pluNo: number;
+  costPrice: number;
   sellingPrice: number;
   quantityValue: number;
 }) => {
@@ -28,6 +29,9 @@ const validateProductInput = (input: {
   if (trimmedName.length > 100) throw new GraphQLError("Product name cannot be longer than 100 characters");
   if (!Number.isFinite(input.pluNo) || input.pluNo <= 0 || input.pluNo > 500) {
     throw new GraphQLError("PLU number must be greater than 0 and less than or equal to 500");
+  }
+  if (!Number.isFinite(input.costPrice) || input.costPrice <= 0 || input.costPrice > 100000) {
+    throw new GraphQLError("Cost price must be greater than 0 and less than or equal to 100000");
   }
   if (!Number.isFinite(input.sellingPrice) || input.sellingPrice <= 0 || input.sellingPrice > 100000) {
     throw new GraphQLError("Selling price must be greater than 0 and less than or equal to 100000");
@@ -135,17 +139,24 @@ export const resolvers = {
         .sort((a, b) => b.totalAmount - a.totalAmount)
         .slice(0, 5);
 
+      const toTransactionRow = (transaction: (typeof transactions)[number]) => ({
+        id: transaction.id,
+        itemSummary: transaction.items.map((item) => item.itemName).join(", "),
+        itemCount: transaction.items.length,
+        totalPrice: transaction.totalPrice,
+        paymentMode: transaction.paymentMode,
+        soldAt: transaction.soldAt.toISOString()
+      });
+
       const recentTransactions = transactions
         .sort((a, b) => b.soldAt.getTime() - a.soldAt.getTime())
         .slice(0, 5)
-        .map((transaction) => ({
-          id: transaction.id,
-          itemSummary: transaction.items.map((item) => item.itemName).join(", "),
-          itemCount: transaction.items.length,
-          totalPrice: transaction.totalPrice,
-          paymentMode: transaction.paymentMode,
-          soldAt: transaction.soldAt.toISOString()
-        }));
+        .map(toTransactionRow);
+
+      const topTransactions = transactions
+        .sort((a, b) => b.totalPrice - a.totalPrice)
+        .slice(0, 5)
+        .map(toTransactionRow);
 
       return {
         cashAmount,
@@ -154,6 +165,7 @@ export const resolvers = {
         cashTransactions: cashSales.length,
         upiTransactions: upiSales.length,
         topSellingItems,
+        topTransactions,
         recentTransactions
       };
     },
@@ -237,7 +249,7 @@ export const resolvers = {
             itemName: product.name,
             quantityValue: item.quantityValue,
             quantityUnit: product.quantityUnit,
-            costPrice: product.sellingPrice,
+            costPrice: product.costPrice,
             sellingPrice: item.sellingPrice,
             paymentMode: args.input.paymentMode,
             totalPrice: item.quantityValue * item.sellingPrice,
@@ -311,6 +323,7 @@ export const resolvers = {
         input: {
           name: string;
           pluNo: number;
+          costPrice: number;
           sellingPrice: number;
           quantityValue: number;
           quantityUnit: "kg" | "g" | "l" | "ml" | "nos";
@@ -337,6 +350,7 @@ export const resolvers = {
       return Product.create({
         name: trimmedName,
         pluNo: args.input.pluNo,
+        costPrice: args.input.costPrice,
         sellingPrice: args.input.sellingPrice,
         quantityValue: args.input.quantityValue,
         quantityUnit: args.input.quantityUnit,
@@ -351,6 +365,7 @@ export const resolvers = {
         input: {
           name: string;
           pluNo: number;
+          costPrice: number;
           sellingPrice: number;
           quantityValue: number;
           quantityUnit: "kg" | "g" | "l" | "ml" | "nos";
@@ -381,6 +396,7 @@ export const resolvers = {
         {
           name: trimmedName,
           pluNo: args.input.pluNo,
+          costPrice: args.input.costPrice,
           sellingPrice: args.input.sellingPrice,
           quantityValue: args.input.quantityValue,
           quantityUnit: args.input.quantityUnit,
@@ -405,6 +421,8 @@ export const resolvers = {
     owner: async (category: { owner: string }) => User.findById(category.owner)
   },
   Product: {
+    sellingPrice: async (product: { sellingPrice?: number; costPrice: number }) =>
+      product.sellingPrice ?? product.costPrice,
     owner: async (product: { owner: string }) => User.findById(product.owner),
     category: async (product: { category: string }) => Category.findById(product.category)
   }

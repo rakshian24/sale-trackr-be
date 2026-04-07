@@ -43,6 +43,7 @@ export const typeDefs = `#graphql
     id: ID!
     name: String!
     pluNo: Int!
+    costPrice: Float!
     sellingPrice: Float!
     quantityValue: Float!
     quantityUnit: QuantityUnit!
@@ -86,6 +87,7 @@ export const typeDefs = `#graphql
     cashTransactions: Int!
     upiTransactions: Int!
     topSellingItems: [TopSellingItem!]!
+    topTransactions: [RecentTransaction!]!
     recentTransactions: [RecentTransaction!]!
   }
 
@@ -132,6 +134,7 @@ export const typeDefs = `#graphql
   input CreateProductInput {
     name: String!
     pluNo: Int!
+    costPrice: Float!
     sellingPrice: Float!
     quantityValue: Float!
     quantityUnit: QuantityUnit!
@@ -141,6 +144,7 @@ export const typeDefs = `#graphql
   input UpdateProductInput {
     name: String!
     pluNo: Int!
+    costPrice: Float!
     sellingPrice: Float!
     quantityValue: Float!
     quantityUnit: QuantityUnit!
