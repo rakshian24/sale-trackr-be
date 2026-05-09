@@ -6,7 +6,7 @@ export interface IProduct extends Document {
   costPrice: number;
   sellingPrice: number;
   quantityValue: number;
-  quantityUnit: "kg" | "g" | "l" | "ml" | "nos";
+  quantityUnit: "kg" | "g" | "l" | "ml" | "nos" | "bunch";
   category: Types.ObjectId;
   owner: Types.ObjectId;
 }
@@ -18,7 +18,7 @@ const productSchema = new Schema<IProduct>(
     costPrice: { type: Number, required: true, min: 0.001, max: 100000 },
     sellingPrice: { type: Number, required: true, min: 0.001, max: 100000 },
     quantityValue: { type: Number, required: true, min: 0.001, max: 1000 },
-    quantityUnit: { type: String, enum: ["kg", "g", "l", "ml", "nos"], required: true },
+    quantityUnit: { type: String, enum: ["kg", "g", "l", "ml", "nos", "bunch"], required: true },
     category: { type: Schema.Types.ObjectId, ref: "Category", required: true },
     owner: { type: Schema.Types.ObjectId, ref: "User", required: true }
   },
