@@ -1,11 +1,20 @@
 import bcrypt from "bcryptjs";
 import { GraphQLError } from "graphql";
-import type { Types } from "mongoose";
+import mongoose, { type ClientSession, type Types } from "mongoose";
 import { Sale } from "../models/Sale";
 import { User } from "../models/User";
 import { Category } from "../models/Category";
 import { Product } from "../models/Product";
 import { Purchase } from "../models/Purchase";
+import { SalePurchaseAllocation } from "../models/SalePurchaseAllocation";
+import {
+  applyFifoSlices,
+  planFifoConsumption,
+  recordSaleAllocations,
+  refreshProductOnHand,
+  rollbackAllocationsForSales,
+  weightedAverageCost,
+} from "../services/inventoryFifo";
 import { createToken } from "../utils/auth";
 import type { GraphQLContext } from "../types/context";
 
@@ -45,24 +54,31 @@ type PurchaseInput = {
   sellingPricePerUnit: number;
 };
 
-/** Sync Product pricing/stock-shape fields from this product's newest purchase by `purchasedAt`. */
+/** Sync Product pricing and unit from the newest purchase; on-hand qty is sum of batch remainders. */
 const syncProductFromLatestPurchase = async (
   ownerId: Types.ObjectId,
-  productId: string
-) => {
-  const latest = await Purchase.findOne({ owner: ownerId, product: productId })
-    .sort({ purchasedAt: -1 })
-    .lean();
-  if (!latest) return;
-  await Product.findOneAndUpdate(
-    { _id: productId, owner: ownerId },
-    {
-      costPrice: latest.costPricePerUnit,
-      sellingPrice: latest.sellingPricePerUnit,
-      quantityValue: latest.purchasedQuantity,
-      quantityUnit: latest.quantityUnit,
-    },
-  );
+  productId: string,
+  session?: ClientSession | null,
+): Promise<void> => {
+  let latestQ = Purchase.findOne({ owner: ownerId, product: productId }).sort({
+    purchasedAt: -1,
+  });
+  if (session) latestQ = latestQ.session(session);
+  const latest = await latestQ.lean();
+
+  if (latest) {
+    await Product.findOneAndUpdate(
+      { _id: productId, owner: ownerId },
+      {
+        costPrice: latest.costPricePerUnit,
+        sellingPrice: latest.sellingPricePerUnit,
+        quantityUnit: latest.quantityUnit,
+      },
+      { session: session ?? undefined },
+    );
+  }
+
+  await refreshProductOnHand(ownerId, productId, session ?? null);
 };
 
 const validatePurchaseInput = (input: PurchaseInput) => {
@@ -275,44 +291,115 @@ export const resolvers = {
       const soldAt = new Date();
       const checkoutId = new Date().getTime().toString(36) + Math.random().toString(36).slice(2, 10);
 
-      const saleDocs = await Promise.all(
-        args.input.items.map(async (item) => {
-          const product = await Product.findOne({ _id: item.productId, owner: user._id });
-          if (!product) throw new GraphQLError("Selected product not found");
-          if (item.quantityValue <= 0) throw new GraphQLError("Quantity must be greater than 0");
-          if (item.sellingPrice <= 0) throw new GraphQLError("Selling price must be greater than 0");
+      const session = await mongoose.startSession();
+      try {
+        let createdSales: InstanceType<typeof Sale>[] = [];
+        await session.withTransaction(async () => {
+          const touchedProductIds = new Set<string>();
 
-          return {
-            checkoutId,
-            product: product._id,
-            itemName: product.name,
-            quantityValue: item.quantityValue,
-            quantityUnit: product.quantityUnit,
-            costPrice: product.costPrice,
-            sellingPrice: item.sellingPrice,
-            paymentMode: args.input.paymentMode,
-            totalPrice: item.quantityValue * item.sellingPrice,
-            soldAt,
-            owner: user._id
-          };
-        })
-      );
+          for (const item of args.input.items) {
+            const product = await Product.findOne({ _id: item.productId, owner: user._id }).session(
+              session,
+            );
+            if (!product) throw new GraphQLError("Selected product not found");
+            if (item.quantityValue <= 0) throw new GraphQLError("Quantity must be greater than 0");
+            if (item.sellingPrice <= 0) throw new GraphQLError("Selling price must be greater than 0");
 
-      return Sale.insertMany(saleDocs);
+            const slices = await planFifoConsumption(
+              user._id,
+              product._id,
+              product.quantityUnit,
+              item.quantityValue,
+              session,
+            );
+            const costPrice = weightedAverageCost(slices);
+
+            const [saleDoc] = await Sale.create(
+              [
+                {
+                  checkoutId,
+                  product: product._id,
+                  itemName: product.name,
+                  quantityValue: item.quantityValue,
+                  quantityUnit: product.quantityUnit,
+                  costPrice,
+                  sellingPrice: item.sellingPrice,
+                  paymentMode: args.input.paymentMode,
+                  totalPrice: item.quantityValue * item.sellingPrice,
+                  soldAt,
+                  owner: user._id,
+                },
+              ],
+              { session },
+            );
+
+            await applyFifoSlices(slices, user._id, session);
+            await recordSaleAllocations(saleDoc._id, user._id, slices, session);
+            touchedProductIds.add(product._id.toString());
+          }
+
+          for (const pid of touchedProductIds) {
+            await refreshProductOnHand(user._id, pid, session);
+          }
+
+          createdSales = await Sale.find({ checkoutId, owner: user._id })
+            .session(session)
+            .sort({ _id: 1 });
+        });
+
+        return createdSales;
+      } finally {
+        await session.endSession();
+      }
     },
     deleteSale: async (_: unknown, args: { id: string }, context: GraphQLContext) => {
       const user = requireAuth(context);
-      const bySaleId = await Sale.findOne({ _id: args.id, owner: user._id });
-      if (bySaleId) {
-        if (bySaleId.checkoutId) {
-          const deletedMany = await Sale.deleteMany({ checkoutId: bySaleId.checkoutId, owner: user._id });
-          return deletedMany.deletedCount > 0;
-        }
-        const deletedOne = await Sale.findOneAndDelete({ _id: args.id, owner: user._id });
-        return Boolean(deletedOne);
+      const session = await mongoose.startSession();
+      try {
+        let outcome = false;
+        await session.withTransaction(async () => {
+          const probe = await Sale.findOne({ _id: args.id, owner: user._id }).session(session).lean();
+          let saleDocs: Array<{ _id: Types.ObjectId; product: Types.ObjectId }>;
+
+          if (probe) {
+            saleDocs = await Sale.find(
+              probe.checkoutId
+                ? { checkoutId: probe.checkoutId, owner: user._id }
+                : { _id: probe._id, owner: user._id },
+            )
+              .session(session)
+              .select("_id product")
+              .lean();
+          } else {
+            saleDocs = await Sale.find({ checkoutId: args.id, owner: user._id })
+              .session(session)
+              .select("_id product")
+              .lean();
+          }
+
+          if (!saleDocs.length) {
+            outcome = false;
+            return;
+          }
+
+          const saleIds = saleDocs.map((s) => s._id as Types.ObjectId);
+          await rollbackAllocationsForSales(user._id, saleIds, session);
+          await Sale.deleteMany({ _id: { $in: saleIds }, owner: user._id }).session(session);
+
+          const productIds = new Set<string>();
+          for (const s of saleDocs) {
+            productIds.add(String(s.product));
+          }
+          for (const pid of productIds) {
+            await refreshProductOnHand(user._id, pid, session);
+          }
+          outcome = true;
+        });
+
+        return outcome;
+      } finally {
+        await session.endSession();
       }
-      const deletedByCheckout = await Sale.deleteMany({ checkoutId: args.id, owner: user._id });
-      return deletedByCheckout.deletedCount > 0;
     },
     createCategory: async (
       _: unknown,
@@ -390,16 +477,20 @@ export const resolvers = {
         pluNo: args.input.pluNo
       });
       if (existingByPlu) throw new GraphQLError("PLU number already exists");
-      return Product.create({
+      const created = await Product.create({
         name: trimmedName,
         pluNo: args.input.pluNo,
         costPrice: 1,
         sellingPrice: 1,
-        quantityValue: 1,
+        quantityValue: 0,
         quantityUnit: "nos",
         category: category._id,
         owner: user._id
       });
+      await refreshProductOnHand(user._id, String(created._id), null);
+      const synced = await Product.findById(created._id);
+      if (!synced) throw new GraphQLError("Product not found after creation");
+      return synced;
     },
     updateProduct: async (
       _: unknown,
@@ -461,6 +552,7 @@ export const resolvers = {
         product: product._id,
         productName: product.name,
         purchasedQuantity: args.input.purchasedQuantity,
+        quantityRemaining: args.input.purchasedQuantity,
         quantityUnit: args.input.quantityUnit,
         costPricePerUnit: args.input.costPricePerUnit,
         sellingPricePerUnit: args.input.sellingPricePerUnit,
@@ -481,6 +573,29 @@ export const resolvers = {
       const product = await Product.findOne({ _id: args.input.productId, owner: user._id });
       if (!product) throw new GraphQLError("Selected product not found");
 
+      const existing = await Purchase.findOne({ _id: args.id, owner: user._id }).lean();
+      if (!existing) throw new GraphQLError("Purchase not found");
+
+      if (args.input.productId !== existing.product.toString()) {
+        const blocked = await SalePurchaseAllocation.exists({
+          purchase: args.id,
+          owner: user._id,
+        });
+        if (blocked) {
+          throw new GraphQLError("Cannot change the product on a purchase that already has sales.");
+        }
+      }
+
+      const deltaQty = args.input.purchasedQuantity - existing.purchasedQuantity;
+      const oldRemaining =
+        typeof existing.quantityRemaining === "number"
+          ? existing.quantityRemaining
+          : existing.purchasedQuantity;
+      const newRemaining = Math.max(
+        0,
+        Math.min(args.input.purchasedQuantity, oldRemaining + deltaQty),
+      );
+
       const updated = await Purchase.findOneAndUpdate(
         { _id: args.id, owner: user._id },
         {
@@ -488,6 +603,7 @@ export const resolvers = {
           product: product._id,
           productName: product.name,
           purchasedQuantity: args.input.purchasedQuantity,
+          quantityRemaining: newRemaining,
           quantityUnit: args.input.quantityUnit,
           costPricePerUnit: args.input.costPricePerUnit,
           sellingPricePerUnit: args.input.sellingPricePerUnit,
@@ -497,11 +613,24 @@ export const resolvers = {
         { new: true }
       );
       if (!updated) throw new GraphQLError("Purchase not found");
-      await syncProductFromLatestPurchase(user._id, product._id.toString());
+
+      const prevProductId = existing.product.toString();
+      await syncProductFromLatestPurchase(user._id, prevProductId);
+      if (prevProductId !== product._id.toString()) {
+        await syncProductFromLatestPurchase(user._id, product._id.toString());
+      }
       return updated;
     },
     deletePurchase: async (_: unknown, args: { id: string }, context: GraphQLContext) => {
       const user = requireAuth(context);
+      const blocked = await SalePurchaseAllocation.exists({
+        purchase: args.id,
+        owner: user._id,
+      });
+      if (blocked) {
+        throw new GraphQLError("Cannot delete a purchase linked to recorded sales.");
+      }
+
       const deleted = await Purchase.findOneAndDelete({ _id: args.id, owner: user._id }).lean();
       if (!deleted) return false;
       await syncProductFromLatestPurchase(user._id, deleted.product.toString());

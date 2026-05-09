@@ -17,7 +17,7 @@ const productSchema = new Schema<IProduct>(
     pluNo: { type: Number, required: true, min: 1, max: 500 },
     costPrice: { type: Number, required: true, min: 0.001, max: 100000 },
     sellingPrice: { type: Number, required: true, min: 0.001, max: 100000 },
-    quantityValue: { type: Number, required: true, min: 0.001, max: 1000 },
+    quantityValue: { type: Number, required: true, min: 0, max: 100000 },
     quantityUnit: { type: String, enum: ["kg", "g", "l", "ml", "nos", "bunch"], required: true },
     category: { type: Schema.Types.ObjectId, ref: "Category", required: true },
     owner: { type: Schema.Types.ObjectId, ref: "User", required: true }

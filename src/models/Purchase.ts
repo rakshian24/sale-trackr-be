@@ -5,6 +5,7 @@ export interface IPurchase extends Document {
   product: Types.ObjectId;
   productName: string;
   purchasedQuantity: number;
+  quantityRemaining: number;
   quantityUnit: "kg" | "l" | "ml" | "nos" | "bunch";
   costPricePerUnit: number;
   sellingPricePerUnit: number;
@@ -19,6 +20,7 @@ const purchaseSchema = new Schema<IPurchase>(
     product: { type: Schema.Types.ObjectId, ref: "Product", required: true },
     productName: { type: String, required: true, trim: true },
     purchasedQuantity: { type: Number, required: true, min: 0.001, max: 100000 },
+    quantityRemaining: { type: Number, required: true, min: 0, max: 100000 },
     quantityUnit: {
       type: String,
       enum: ["kg", "l", "ml", "nos", "bunch"],
