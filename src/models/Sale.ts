@@ -5,7 +5,7 @@ export interface ISale extends Document {
   product: Types.ObjectId;
   itemName: string;
   quantityValue: number;
-  quantityUnit: "kg" | "g" | "l" | "ml" | "nos";
+  quantityUnit: "kg" | "g" | "l" | "ml" | "nos" | "bunch";
   paymentMode: "CASH" | "UPI";
   costPrice: number;
   sellingPrice: number;
@@ -20,7 +20,7 @@ const saleSchema = new Schema<ISale>(
     product: { type: Schema.Types.ObjectId, ref: "Product", required: true },
     itemName: { type: String, required: true, trim: true },
     quantityValue: { type: Number, required: true, min: 0.01 },
-    quantityUnit: { type: String, enum: ["kg", "g", "l", "ml", "nos"], required: true },
+    quantityUnit: { type: String, enum: ["kg", "g", "l", "ml", "nos", "bunch"], required: true },
     paymentMode: { type: String, enum: ["CASH", "UPI"], required: true },
     costPrice: { type: Number, required: true, min: 0 },
     sellingPrice: { type: Number, required: true, min: 0 },

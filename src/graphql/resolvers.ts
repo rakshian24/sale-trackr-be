@@ -1,9 +1,11 @@
 import bcrypt from "bcryptjs";
 import { GraphQLError } from "graphql";
+import type { Types } from "mongoose";
 import { Sale } from "../models/Sale";
 import { User } from "../models/User";
 import { Category } from "../models/Category";
 import { Product } from "../models/Product";
+import { Purchase } from "../models/Purchase";
 import { createToken } from "../utils/auth";
 import type { GraphQLContext } from "../types/context";
 
@@ -17,27 +19,12 @@ const requireAuth = (context: GraphQLContext) => {
 const escapeRegex = (value: string): string =>
   value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-const validateProductInput = (input: {
-  name: string;
-  pluNo: number;
-  costPrice: number;
-  sellingPrice: number;
-  quantityValue: number;
-}) => {
+const validateProductBasics = (input: { name: string; pluNo: number }) => {
   const trimmedName = input.name.trim();
   if (!trimmedName) throw new GraphQLError("Product name is required");
   if (trimmedName.length > 100) throw new GraphQLError("Product name cannot be longer than 100 characters");
   if (!Number.isFinite(input.pluNo) || input.pluNo <= 0 || input.pluNo > 500) {
     throw new GraphQLError("PLU number must be greater than 0 and less than or equal to 500");
-  }
-  if (!Number.isFinite(input.costPrice) || input.costPrice <= 0 || input.costPrice > 100000) {
-    throw new GraphQLError("Cost price must be greater than 0 and less than or equal to 100000");
-  }
-  if (!Number.isFinite(input.sellingPrice) || input.sellingPrice <= 0 || input.sellingPrice > 100000) {
-    throw new GraphQLError("Selling price must be greater than 0 and less than or equal to 100000");
-  }
-  if (!Number.isFinite(input.quantityValue) || input.quantityValue <= 0 || input.quantityValue > 1000) {
-    throw new GraphQLError("Quantity value must be greater than 0 and less than or equal to 1000");
   }
 };
 
@@ -46,6 +33,54 @@ const validateCategoryName = (name: string) => {
   if (!trimmedName) throw new GraphQLError("Category name is required");
   if (trimmedName.length > 100) throw new GraphQLError("Category name cannot be longer than 100 characters");
   return trimmedName;
+};
+
+type PurchaseInput = {
+  purchasedAt: string;
+  source: string;
+  productId: string;
+  purchasedQuantity: number;
+  quantityUnit: "kg" | "g" | "l" | "ml" | "nos" | "bunch";
+  costPricePerUnit: number;
+  sellingPricePerUnit: number;
+};
+
+/** Sync Product pricing/stock-shape fields from this product's newest purchase by `purchasedAt`. */
+const syncProductFromLatestPurchase = async (
+  ownerId: Types.ObjectId,
+  productId: string
+) => {
+  const latest = await Purchase.findOne({ owner: ownerId, product: productId })
+    .sort({ purchasedAt: -1 })
+    .lean();
+  if (!latest) return;
+  await Product.findOneAndUpdate(
+    { _id: productId, owner: ownerId },
+    {
+      costPrice: latest.costPricePerUnit,
+      sellingPrice: latest.sellingPricePerUnit,
+      quantityValue: latest.purchasedQuantity,
+      quantityUnit: latest.quantityUnit,
+    },
+  );
+};
+
+const validatePurchaseInput = (input: PurchaseInput) => {
+  const source = input.source.trim();
+  if (!source) throw new GraphQLError("Source is required");
+  if (source.length > 120) throw new GraphQLError("Source cannot be longer than 120 characters");
+  if (!Number.isFinite(input.purchasedQuantity) || input.purchasedQuantity <= 0 || input.purchasedQuantity > 100000) {
+    throw new GraphQLError("Purchased quantity must be greater than 0 and less than or equal to 100000");
+  }
+  if (!Number.isFinite(input.costPricePerUnit) || input.costPricePerUnit <= 0 || input.costPricePerUnit > 100000) {
+    throw new GraphQLError("Cost price per unit must be greater than 0 and less than or equal to 100000");
+  }
+  if (!Number.isFinite(input.sellingPricePerUnit) || input.sellingPricePerUnit <= 0 || input.sellingPricePerUnit > 100000) {
+    throw new GraphQLError("Selling price per unit must be greater than 0 and less than or equal to 100000");
+  }
+  const purchasedAt = new Date(input.purchasedAt);
+  if (Number.isNaN(purchasedAt.getTime())) throw new GraphQLError("Invalid purchase date and time");
+  return { source, purchasedAt };
 };
 
 type DatePreset = "TODAY" | "YESTERDAY" | "THIS_WEEK" | "LAST_WEEK" | "THIS_MONTH" | "LAST_MONTH";
@@ -187,6 +222,10 @@ export const resolvers = {
       })
         .sort({ name: 1 })
         .limit(10);
+    },
+    purchases: async (_: unknown, __: unknown, context: GraphQLContext) => {
+      const user = requireAuth(context);
+      return Purchase.find({ owner: user._id }).sort({ purchasedAt: -1 });
     }
   },
   Mutation: {
@@ -319,24 +358,28 @@ export const resolvers = {
     },
     createProduct: async (
       _: unknown,
-      args: {
-        input: {
-          name: string;
-          pluNo: number;
-          costPrice: number;
-          sellingPrice: number;
-          quantityValue: number;
-          quantityUnit: "kg" | "g" | "l" | "ml" | "nos";
-          categoryId: string;
-        };
-      },
+      args: { input: { name: string; pluNo: number; categoryName?: string | null } },
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
       const trimmedName = args.input.name.trim();
-      validateProductInput(args.input);
-      const category = await Category.findOne({ _id: args.input.categoryId, owner: user._id });
-      if (!category) throw new GraphQLError("Category not found");
+      const trimmedCategoryName = args.input.categoryName?.trim() ?? "";
+      validateProductBasics({ name: trimmedName, pluNo: args.input.pluNo });
+      let category: { _id: Types.ObjectId } | null = null;
+      if (trimmedCategoryName) {
+        category = await Category.findOne({
+          owner: user._id,
+          name: { $regex: `^${escapeRegex(trimmedCategoryName)}$`, $options: "i" }
+        });
+        if (!category) {
+          category = await Category.create({ name: trimmedCategoryName, owner: user._id });
+        }
+      } else {
+        category = await Category.findOne({ owner: user._id }).sort({ name: 1 });
+      }
+      if (!category) {
+        throw new GraphQLError("Add a category before creating products");
+      }
       const existingByName = await Product.findOne({
         owner: user._id,
         name: { $regex: `^${escapeRegex(trimmedName)}$`, $options: "i" }
@@ -350,35 +393,22 @@ export const resolvers = {
       return Product.create({
         name: trimmedName,
         pluNo: args.input.pluNo,
-        costPrice: args.input.costPrice,
-        sellingPrice: args.input.sellingPrice,
-        quantityValue: args.input.quantityValue,
-        quantityUnit: args.input.quantityUnit,
-        category: args.input.categoryId,
+        costPrice: 1,
+        sellingPrice: 1,
+        quantityValue: 1,
+        quantityUnit: "nos",
+        category: category._id,
         owner: user._id
       });
     },
     updateProduct: async (
       _: unknown,
-      args: {
-        id: string;
-        input: {
-          name: string;
-          pluNo: number;
-          costPrice: number;
-          sellingPrice: number;
-          quantityValue: number;
-          quantityUnit: "kg" | "g" | "l" | "ml" | "nos";
-          categoryId: string;
-        };
-      },
+      args: { id: string; input: { name: string; pluNo: number } },
       context: GraphQLContext
     ) => {
       const user = requireAuth(context);
       const trimmedName = args.input.name.trim();
-      validateProductInput(args.input);
-      const category = await Category.findOne({ _id: args.input.categoryId, owner: user._id });
-      if (!category) throw new GraphQLError("Category not found");
+      validateProductBasics({ name: trimmedName, pluNo: args.input.pluNo });
       const existingByName = await Product.findOne({
         _id: { $ne: args.id },
         owner: user._id,
@@ -393,15 +423,7 @@ export const resolvers = {
       if (existingByPlu) throw new GraphQLError("PLU number already exists");
       const product = await Product.findOneAndUpdate(
         { _id: args.id, owner: user._id },
-        {
-          name: trimmedName,
-          pluNo: args.input.pluNo,
-          costPrice: args.input.costPrice,
-          sellingPrice: args.input.sellingPrice,
-          quantityValue: args.input.quantityValue,
-          quantityUnit: args.input.quantityUnit,
-          category: args.input.categoryId
-        },
+        { name: trimmedName, pluNo: args.input.pluNo },
         { new: true }
       );
       if (!product) throw new GraphQLError("Product not found");
@@ -411,6 +433,79 @@ export const resolvers = {
       const user = requireAuth(context);
       const deleted = await Product.findOneAndDelete({ _id: args.id, owner: user._id });
       return Boolean(deleted);
+    },
+    createPurchase: async (
+      _: unknown,
+      args: {
+        input: {
+          purchasedAt: string;
+          source: string;
+          productId: string;
+          purchasedQuantity: number;
+          quantityUnit: "kg" | "g" | "l" | "ml" | "nos" | "bunch";
+          costPricePerUnit: number;
+          sellingPricePerUnit: number;
+        };
+      },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      const { source, purchasedAt } = validatePurchaseInput(args.input);
+
+      const product = await Product.findOne({ _id: args.input.productId, owner: user._id });
+      if (!product) throw new GraphQLError("Selected product not found");
+
+      const totalCost = args.input.purchasedQuantity * args.input.costPricePerUnit;
+      const created = await Purchase.create({
+        source,
+        product: product._id,
+        productName: product.name,
+        purchasedQuantity: args.input.purchasedQuantity,
+        quantityUnit: args.input.quantityUnit,
+        costPricePerUnit: args.input.costPricePerUnit,
+        sellingPricePerUnit: args.input.sellingPricePerUnit,
+        totalCost,
+        purchasedAt,
+        owner: user._id
+      });
+      await syncProductFromLatestPurchase(user._id, product._id.toString());
+      return created;
+    },
+    updatePurchase: async (
+      _: unknown,
+      args: { id: string; input: PurchaseInput },
+      context: GraphQLContext
+    ) => {
+      const user = requireAuth(context);
+      const { source, purchasedAt } = validatePurchaseInput(args.input);
+      const product = await Product.findOne({ _id: args.input.productId, owner: user._id });
+      if (!product) throw new GraphQLError("Selected product not found");
+
+      const updated = await Purchase.findOneAndUpdate(
+        { _id: args.id, owner: user._id },
+        {
+          source,
+          product: product._id,
+          productName: product.name,
+          purchasedQuantity: args.input.purchasedQuantity,
+          quantityUnit: args.input.quantityUnit,
+          costPricePerUnit: args.input.costPricePerUnit,
+          sellingPricePerUnit: args.input.sellingPricePerUnit,
+          totalCost: args.input.purchasedQuantity * args.input.costPricePerUnit,
+          purchasedAt
+        },
+        { new: true }
+      );
+      if (!updated) throw new GraphQLError("Purchase not found");
+      await syncProductFromLatestPurchase(user._id, product._id.toString());
+      return updated;
+    },
+    deletePurchase: async (_: unknown, args: { id: string }, context: GraphQLContext) => {
+      const user = requireAuth(context);
+      const deleted = await Purchase.findOneAndDelete({ _id: args.id, owner: user._id }).lean();
+      if (!deleted) return false;
+      await syncProductFromLatestPurchase(user._id, deleted.product.toString());
+      return true;
     }
   },
   Sale: {
@@ -423,7 +518,15 @@ export const resolvers = {
   Product: {
     sellingPrice: async (product: { sellingPrice?: number; costPrice: number }) =>
       product.sellingPrice ?? product.costPrice,
+    profit: (product: { sellingPrice?: number; costPrice: number }) => {
+      const effectiveSelling = product.sellingPrice ?? product.costPrice;
+      return effectiveSelling - product.costPrice;
+    },
     owner: async (product: { owner: string }) => User.findById(product.owner),
     category: async (product: { category: string }) => Category.findById(product.category)
+  },
+  Purchase: {
+    owner: async (purchase: { owner: string }) => User.findById(purchase.owner),
+    product: async (purchase: { product: string }) => Product.findById(purchase.product)
   }
 };

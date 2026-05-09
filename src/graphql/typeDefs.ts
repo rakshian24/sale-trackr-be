@@ -10,6 +10,7 @@ export const typeDefs = `#graphql
     l
     ml
     nos
+    bunch
   }
 
   enum PaymentMode {
@@ -45,6 +46,7 @@ export const typeDefs = `#graphql
     pluNo: Int!
     costPrice: Float!
     sellingPrice: Float!
+    profit: Float!
     quantityValue: Float!
     quantityUnit: QuantityUnit!
     category: Category!
@@ -62,6 +64,20 @@ export const typeDefs = `#graphql
     paymentMode: PaymentMode!
     totalPrice: Float!
     soldAt: String!
+    owner: User!
+  }
+
+  type Purchase {
+    id: ID!
+    source: String!
+    product: Product!
+    productName: String!
+    purchasedQuantity: Float!
+    quantityUnit: QuantityUnit!
+    costPricePerUnit: Float!
+    sellingPricePerUnit: Float!
+    totalCost: Float!
+    purchasedAt: String!
     owner: User!
   }
 
@@ -134,21 +150,32 @@ export const typeDefs = `#graphql
   input CreateProductInput {
     name: String!
     pluNo: Int!
-    costPrice: Float!
-    sellingPrice: Float!
-    quantityValue: Float!
-    quantityUnit: QuantityUnit!
-    categoryId: ID!
+    categoryName: String
   }
 
   input UpdateProductInput {
     name: String!
     pluNo: Int!
-    costPrice: Float!
-    sellingPrice: Float!
-    quantityValue: Float!
+  }
+
+  input CreatePurchaseInput {
+    purchasedAt: String!
+    source: String!
+    productId: ID!
+    purchasedQuantity: Float!
     quantityUnit: QuantityUnit!
-    categoryId: ID!
+    costPricePerUnit: Float!
+    sellingPricePerUnit: Float!
+  }
+
+  input UpdatePurchaseInput {
+    purchasedAt: String!
+    source: String!
+    productId: ID!
+    purchasedQuantity: Float!
+    quantityUnit: QuantityUnit!
+    costPricePerUnit: Float!
+    sellingPricePerUnit: Float!
   }
 
   type Query {
@@ -158,6 +185,7 @@ export const typeDefs = `#graphql
     categories: [Category!]!
     products: [Product!]!
     searchProducts(term: String!): [Product!]!
+    purchases: [Purchase!]!
   }
 
   type Mutation {
@@ -171,5 +199,8 @@ export const typeDefs = `#graphql
     createProduct(input: CreateProductInput!): Product!
     updateProduct(id: ID!, input: UpdateProductInput!): Product!
     deleteProduct(id: ID!): Boolean!
+    createPurchase(input: CreatePurchaseInput!): Purchase!
+    updatePurchase(id: ID!, input: UpdatePurchaseInput!): Purchase!
+    deletePurchase(id: ID!): Boolean!
   }
 `;
