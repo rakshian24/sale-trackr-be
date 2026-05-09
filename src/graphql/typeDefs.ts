@@ -73,6 +73,7 @@ export const typeDefs = `#graphql
     product: Product!
     productName: String!
     purchasedQuantity: Float!
+    quantityRemaining: Float!
     quantityUnit: QuantityUnit!
     costPricePerUnit: Float!
     sellingPricePerUnit: Float!
